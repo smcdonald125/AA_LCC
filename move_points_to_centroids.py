@@ -10,6 +10,8 @@ import numpy as np
 import geopandas as gpd
 from tempfile import TemporaryDirectory
 
+gdal.UseExceptions()
+
 def rasterize_points(points:str, raster:str, nodata:int, dtype:str, lcc_raster:str, pixel_size:int=1.0, use_vector_spatial:bool=False):
 
     # Open the vector data source to be rasterized
@@ -46,8 +48,12 @@ def rasterize_points(points:str, raster:str, nodata:int, dtype:str, lcc_raster:s
         # geotransform
         geotransform = lcc_ds.GetGeoTransform()
 
+        #  clean up
+        lcc_ds = None
+
     # Create the destination data source
-    target_ds = gdal.GetDriverByName('GTiff').Create(raster, n_cols, n_rows, 1, dtype)
+    driver = gdal.GetDriverByName('GTiff')
+    target_ds = driver.Create(raster, n_cols, n_rows, 1, dtype)
     target_ds.SetGeoTransform(geotransform)
     band = target_ds.GetRasterBand(1)
     band.SetNoDataValue(nodata)
@@ -56,13 +62,15 @@ def rasterize_points(points:str, raster:str, nodata:int, dtype:str, lcc_raster:s
     # Rasterize
     print("rasterizing")
     gdal.RasterizeLayer(target_ds, 
-                        [1], source_layer, 
+                        [1], 
+                        source_layer, 
                         options = ["ATTRIBUTE=uid"]) # "ALL_TOUCHED=TRUE",
     
     print("flushing")
     
     target_ds.FlushCache()
-    del target_ds
+    target_ds = None
+    source_layer = None
 
 def vectorize_points(raster:str, path:str, state:str):
     #  get raster datasource
@@ -114,8 +122,8 @@ def dtype_helper(max_val:int):
 if __name__ == "__main__":
 
     # folder paths
-    input_folder = r"" # folder with points data and LCC rasters
-    output_folder = r"" # path to folder to write results
+    input_folder = r"C:/Users/smcdonald/Documents/Data/LULCC_2024ed/AccuracyAssessment" # folder with points data and LCC rasters
+    output_folder = r"C:/Users/smcdonald/Documents/Data/LULCC_2024ed/AccuracyAssessment/clean_points/point_rasters" # path to folder to write results
 
     # file paths
     points_path = f"{input_folder}/clean_points/lcc_aa_points_cleaned.gpkg"
@@ -124,33 +132,52 @@ if __name__ == "__main__":
     pixel_size = 1.0
     nodata = 0
 
+    # states lookup
+    states = {
+        # 'DC'    : "wash_11001_landcoverchange_2013_2021.tif",
+        # 'PA'    : "PA_landcoverchange_2013_2022.tif",
+        'VA'    : r"X:/2024_ed_AA/t1-t3_lc_change/VA/VA_landcoverchange_2014_2021.tif",
+        'MD'    : r"X:/2024_ed_AA/t1-t3_lc_change/MD/MD_landcoverchange_2013_2021.tif",
+        'DE'    : r"X:/2024_ed_AA/t1-t3_lc_change/DE/DE_landcoverchange_2013_2021.tif",
+        'NY'    : r"X:/2024_ed_AA/t1-t3_lc_change/NY/NY_landcoverchange_2013_2022.tif",
+        'WV'    : r"X:/2024_ed_AA/t1-t3_lc_change/WV/WV_landcoverchange_2014_2022.tif",
+    }
+
     # open points
     points = gpd.read_file(points_path, layer='AA_clean')
 
-    # TODO iterate states -- for now just filter DC for testing
-    with TemporaryDirectory() as temp_dir:
+    for state in states:
+        print(state)
 
-        vector_data = os.path.join(temp_dir, 'temp_vectors.fgb')
+        # paths
+        lcc_raster = states[state]
+        output_raster = f"{output_folder}/{state}.tif"
 
         #  query out points for the state
         pts = (
             points
-            .query("state == 'DC'")
+            .query("state == @state")
             .filter(items=['uid', 'geometry'], axis=1)
         )
+        print(pts)
 
         # get smallest int dtype
         mx_val = np.max(pts['uid'])
         dtype = dtype_helper(mx_val)
 
-        # write queried data to temp directory
-        pts.to_file(vector_data, driver='FlatGeobuf')
-        pts = None
+        with TemporaryDirectory() as temp_dir:
 
-        # rasterize the points to the same grid as the lc change raster
-        lcc_raster = f"{input_folder}/lcc_rasters/DC/wash_11001_landcoverchange_2013_2021.tif"
-        output_raster = f"{output_folder}/DC.tif"
-        rasterize_points(vector_data, output_raster, nodata, dtype, lcc_raster)
+            vector_data = os.path.join(temp_dir, f"{state}_temp_vectors.fgb")
 
-    # vectorize cell centroids and create 3x3 square buffer window
-    vectorize_points(output_raster, output_folder, "DC")
+            # write queried data to temp directory
+            pts.to_file(vector_data, driver='FlatGeobuf')
+            pts = None
+
+            # rasterize the points to the same grid as the lc change raster
+            rasterize_points(vector_data, output_raster, nodata, dtype, lcc_raster)
+
+        # vectorize cell centroids and create 3x3 square buffer window
+        vectorize_points(output_raster, output_folder, state)
+
+        # remove raster when vectorization is complete
+        os.remove(output_raster)
